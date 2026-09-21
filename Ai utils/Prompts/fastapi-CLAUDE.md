@@ -291,7 +291,7 @@ Every route decorator sets:
 - Explicitly test authorization boundaries.
 - Explicitly test rate-limit enforcement, and, for any domain following the ledger (§10B) or external-callback (§10C) patterns, webhook/callback idempotency and balance correctness under concurrent requests.
 
-## 18. Security (FastAPI-Specific)
+## 18. Security (FastAPI-Specific & Verified Vulnerabilities)
 
 - Disable or protect `/docs`, `/redoc`, `/openapi.json` in production.
 - Keep all secrets (`SECRET_KEY`, any third-party API keys, DB credentials) in environment variables only, validated by `project_config/settings.py` at startup.
@@ -299,6 +299,11 @@ Every route decorator sets:
 - Verify webhook/callback signatures on every external request (§10A/§10C).
 - Confirm dev-only routes (§10F) are unreachable outside the dev environment before every release.
 - Give admin routes their own throttle dependency instead of sharing the public rate limit.
+- **Path Traversal via `UploadFile` (Verified Vulnerability):** `file.filename` is client-controlled. Using `os.path.join(DIR, file.filename)` allows attackers to write files outside the intended directory (e.g. `../../../etc/passwd`). Always sanitize filenames before saving.
+- **Mass Assignment / Over-posting (Verified Vulnerability):** Using the same Pydantic schema for reading and updating allows attackers to update fields they shouldn't (e.g., `is_admin=True`). Always use strict, separate `Update` schemas.
+- **Cross-Site WebSocket Hijacking - CSWSH (Verified Vulnerability):** WebSockets are not restricted by CORS. If using cookie-based auth, an attacker's site can open a WebSocket to your API and the browser will attach the user's cookies. Manually verify the `Origin` header in WebSocket endpoints.
+- **Regex Denial of Service - ReDoS (Verified Vulnerability):** Using complex, unoptimized regex in Pydantic `Field(pattern="...")` can cause the evaluation to take exponentially long. Because FastAPI uses a single-threaded event loop, a ReDoS attack on an `async def` route completely halts the server for all users.
+- **Timing Attacks on Signatures (Verified Vulnerability):** Comparing webhook signatures, API keys, or tokens using standard string equality `==` allows attackers to guess the token character by character based on response times. Always use `hmac.compare_digest`.
 
 ## 19. Implementation Discipline — Precautions Before Writing Code
 
@@ -333,4 +338,38 @@ If a change doesn't obviously map to one of these checks — a genuinely new kin
 
 ---
 
-*Status: v4 — added §19, a pre-implementation checklist tying security, modularity/coupling, throttling, database, and error-handling rules together at the moment code is actually written.*
+## 20. Concurrency & Async Discipline (The `async def` vs `def` Rule)
+
+This is the most critical rule for FastAPI performance. Breaking this causes the entire server to freeze.
+
+- **In `async def` routes:** Code runs directly on the single-threaded asyncio event loop. **NEVER** use blocking synchronous functions inside an `async def` route or inside any function called by it. If you use a synchronous database call (`db.query()`), a synchronous HTTP request (`requests.get()`), or a heavy CPU-bound task, the event loop blocks and the server cannot accept any other requests.
+- **In plain `def` routes:** FastAPI automatically runs these in an external worker threadpool (`anyio.to_thread.run_sync`). Synchronous blocking calls are safe here.
+- **The Rule:** If your logic, dependencies, or database driver is synchronous, you **MUST** define the endpoint as a regular `def`. Only use `async def` if you are using purely asynchronous libraries (`httpx.AsyncClient`, `AsyncSession`, `aiofiles`) or explicitly offloading sync code via `run_in_threadpool`.
+
+## 21. Common FastAPI Anti-Patterns & Lifecycle Traps
+
+**Dependency Injection (`Depends`) Pitfalls:**
+- **Dependency State Leaks:** A dependency that opens a resource (like a database session) MUST use `yield` and a `finally` block to close it (e.g., `yield db; finally: db.close()`). Simply returning a session leaks the connection.
+- **`Depends()` Cache Misunderstanding:** By default, dependencies are cached per-request (`use_cache=True`). If you need a dependency to execute multiple times in a single request and return fresh state, you must set `use_cache=False`.
+- **DB Queries Inside Pydantic Validators:** Do not inject database sessions into Pydantic `@field_validator` or `@model_validator`. Pydantic models should remain pure data containers; DB validation belongs in route dependencies or service layers.
+
+**Background Tasks (`BackgroundTasks`) Traps:**
+- **DB Session Crashes (`DetachedInstanceError`):** Never pass a request-scoped database session (`db: Session = Depends(...)`) directly into a `BackgroundTask`. Background tasks run *after* the request finishes and the session is closed via the dependency's `finally` block.
+- **Misusing for Heavy Work:** `BackgroundTasks` runs in-process memory. If the server restarts or crashes, all pending background tasks are instantly lost. Use Celery or Redis-Queue (RQ) for durable, heavy tasks (like mass emails or video processing).
+- **Silent Failures:** Exceptions thrown inside `BackgroundTasks` do not trigger FastAPI's global exception handler (since the HTTP response was already sent). Wrap their logic in robust `try/except` blocks with explicit logging.
+
+**State & Middleware Gotchas:**
+- **Global Mutable State:** Never use global variables to store request-specific state, user IDs, or sessions. Since FastAPI workers handle concurrent requests in the same process, global state will bleed across different users' requests.
+- **Consuming the Request Body Twice:** If middleware or a dependency reads `await request.body()`, the ASGI stream is exhausted. The Pydantic route handler will fail to parse the body unless the middleware explicitly re-injects the stream.
+- **Overusing `BaseHTTPMiddleware`:** Avoid `BaseHTTPMiddleware` for complex applications as it has overhead, can mess with context variables, and breaks streaming responses. Use pure ASGI middleware instead.
+
+**Lifecycle & Resource Management:**
+- **Missing `await` Silent Bugs:** Calling an async function (e.g. `async_service.do_work()`) without `await` silently creates a coroutine object but never executes the work. Always `await`.
+- **Recreating Clients per Request:** Never initialize `httpx.AsyncClient()` or SQLAlchemy `create_engine()` inside an endpoint. This destroys connection pooling and rapidly exhausts OS sockets. Initialize them once at application startup.
+- **Deprecated `@app.on_event`:** Stop using `@app.on_event("startup")` and `shutdown`. Modern FastAPI uses `@asynccontextmanager` with `lifespan(app: FastAPI)` for setting up and tearing down global resources like DB pools and HTTP clients.
+- **Out of Memory on File Uploads:** Never use `await file.read()` on large `UploadFile` objects, which loads the entire file into RAM and crashes the server. Spool to disk or process in chunks.
+- **CORS Misconfiguration:** Setting `allow_origins=["*"]` along with `allow_credentials=True` is a security risk and is actively blocked by modern browsers. Be specific with credentialed origins.
+
+---
+
+*Status: v5 — added §20 (Concurrency & Async Discipline), §21 (Common Anti-Patterns), and verified vulnerabilities in §18.*
