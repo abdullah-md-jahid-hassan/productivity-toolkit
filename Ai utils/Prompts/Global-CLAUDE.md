@@ -35,6 +35,7 @@
   - Access tokens: short-lived (e.g. 15 min – 1 hour)
   - Refresh tokens: longer-lived, stored securely (httpOnly cookie, not localStorage), rotated on use
   - Always verify token signature and expiry on the server side
+- **CSRF Protection:** If using httpOnly cookies for authentication, always ensure CSRF protection is in place (e.g., SameSite=Strict or explicit CSRF tokens).
 - **Rate limiting & throttling** — every public-facing endpoint needs a limit, to stop abuse and brute-force attacks.
 - **CORS** — allow only specific, known origins. Never use `*` in production, especially with credentials enabled.
 - **Logging** — never log passwords, tokens, card numbers, or personal data. Mask/redact if it must appear.
@@ -42,6 +43,7 @@
   - Search for that package's recent security history before installing it — recent advisories, malware reports, compromised-maintainer incidents, or unusual publishing activity for the *specific version* being installed. Don't rely on memory or assume a well-known package name is automatically safe; check the version.
   - Don't default to "always install the latest version." Latest is preferred only if it checks out clean. A freshly published version is often the least-verified by the community and is exactly the version real supply-chain attacks target — a compromised maintainer account publishing a malicious patch release is a known, recurring attack pattern.
   - If the latest version has any credible report of malicious code, a security incident, or suspicious activity, fall back to the previous version and run the same check on it. If that version is also flagged, keep falling back one version at a time until a version with a clean, verified history is found — never skip the check on a fallback version just because it's older; a backdoor is sometimes discovered well after a version was published.
+  - **If no version of the package checks out clean** (every version you try, back through its history, has a credible security issue), stop trying to force that specific package. Look for a well-maintained alternative package that solves the same problem, and run this exact same verification process on it — recent history check, avoid blindly picking latest, check its dependency tree too. Keep searching for an alternative until one passes clean. Security comes before sticking with the originally-planned package.
   - **Check the full dependency tree, not only the package being installed directly.** A package can look clean while pulling in a compromised transitive dependency — this is how several real supply-chain attacks have actually spread, through a small, deeply-nested utility package that many other packages depend on. Apply the same version-history check to the significant packages in the dependency tree, not only the top-level one being added.
   - Once a verified-safe version is chosen, pin it exactly in the lock file (`package-lock.json`, `poetry.lock`, `Cargo.lock`, etc.) — don't leave it on an open version range that could silently resolve to a different, unverified version on a future install.
 
@@ -79,6 +81,7 @@
 - Store secrets in a proper secret manager or vault — never commit `.env` files or credentials to the repo (add them to `.gitignore`).
 - CI/CD pipeline should run lint + tests automatically before allowing a merge to the main branch.
 - Add monitoring, logging, and alerting from the start of a project — don't wait until something breaks in production.
+- **Structured Logging:** Prefer structured JSON logging in production over plain text, so logs can be easily queried in systems like Datadog or ELK.
 - Always have a rollback plan (or automated rollback) before deploying a change to production.
 - For AWS EC2 / cloud infra specifically: use security groups with least-privilege rules, avoid public access to databases, and snapshot/back up before major changes like resizing or cloning an instance.
 
@@ -108,7 +111,3 @@ This section controls **how the AI talks**, separate from how it writes code.
 - Avoid rare or complex words when a simple word means the same thing (say "use" instead of "utilize," say "fix" instead of "remediate").
 - Keep explanations short and direct. Prefer bullet points or short paragraphs over long blocks of text.
 - This rule applies **only to chat explanations and summaries** — not to the actual code, code comments, or technical names, which should stay professional and production-grade as normal.
-
----
-
-*Status: v2 — added a strict, recursive package supply-chain verification policy under Security, covering direct packages and their transitive dependency tree across every package manager.*
