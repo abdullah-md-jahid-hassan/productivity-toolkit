@@ -1,0 +1,167 @@
+# =============================================================================
+# n8n — Self-Hosted Production Stack
+# =============================================================================
+# This runs n8n (workflow automation) with PostgreSQL as the database.
+# PostgreSQL is used instead of the default SQLite because SQLite locks the
+# whole file on every write. Under real usage (many workflows running at the
+# same time), that causes timeouts and can corrupt your data. Postgres is
+# built to handle many writes at once and is much safer for real work.
+#
+# HOW TO RUN:
+#   1. Copy .env.example to .env and fill in real values (see comments there).
+#   2. Run:  docker compose up -d
+#   3. Open: http://localhost:5678
+#
+# Note: modern Docker Compose no longer needs a top-level "version:" key,
+# so it is left out on purpose — Compose reads this file the same either way.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — stores all n8n data: workflows, credentials, execution logs.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine   # Alpine = smaller image, same Postgres engine
+    container_name: n8n_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Named volume, managed by Docker. This survives even if you delete
+      # and recreate the container, and avoids file-permission issues that
+      # bind mounts (a plain folder path) often cause on Windows/Mac.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Docker will not report Postgres as "ready" until it can really
+      # accept connections. n8n waits for this before it starts.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - n8n_network
+    # Resource limits stop one runaway container from eating your whole
+    # computer's RAM/CPU. Adjust these numbers to fit your machine.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # n8n — the workflow automation engine and editor UI.
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:2.32.5   # Pinned version — see note at the bottom on updating
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      # Bound to 127.0.0.1 only, so n8n is reachable from THIS computer only,
+      # not from other devices on your network or the internet. This is the
+      # safer default for local use. Remove "127.0.0.1:" (leave just
+      # "5678:5678") only if you deliberately want it reachable from your LAN,
+      # and only after you understand the security trade-off.
+      - "127.0.0.1:5678:5678"
+    environment:
+      # --- Database connection ---------------------------------------------
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres        # service name above, Docker resolves this
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+
+      # --- Security keys ------------------------------------------------------
+      # N8N_ENCRYPTION_KEY encrypts every saved credential (API keys, tokens,
+      # passwords) inside the database. If you lose this key, every saved
+      # credential becomes unreadable forever — there is no recovery.
+      # Back up your .env file somewhere safe (password manager, etc.).
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      # Keeps you logged in across container restarts instead of forcing a
+      # re-login every time n8n restarts.
+      N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_JWT_SECRET}
+
+      # --- Networking / access ------------------------------------------------
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:5678/
+      # n8n sets a "secure" cookie by default, which only works over HTTPS.
+      # Since this is plain HTTP on your own machine, we turn that off here.
+      # IMPORTANT: if you later put this behind a real domain with HTTPS
+      # (for production use, so third-party services can call your webhooks),
+      # remove this line so the cookie goes back to secure mode.
+      N8N_SECURE_COOKIE: "false"
+
+      # --- Regional / general settings ----------------------------------------
+      GENERIC_TIMEZONE: Asia/Dhaka   # change to your timezone if needed
+      TZ: Asia/Dhaka
+      NODE_ENV: production
+      N8N_LOG_LEVEL: info
+
+      # --- Privacy --------------------------------------------------------
+      N8N_DIAGNOSTICS_ENABLED: "false"   # turns off anonymous usage tracking
+
+      # --- Security hardening -----------------------------------------------
+      # Stops workflow code (e.g. the Code node) from reading arbitrary
+      # environment variables through process.env. Good practice even for
+      # a single-user setup, since it limits what a bad or copy-pasted
+      # workflow/community node could read.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+
+      # --- Execution log cleanup ----------------------------------------------
+      # Without this, every workflow run is kept forever and your database
+      # slowly grows. This prunes execution history older than 14 days.
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "336"   # hours = 14 days
+    volumes:
+      # Holds encryption key backup, local settings, and any binary data —
+      # keep this mounted even though the main data lives in Postgres now.
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy   # n8n waits for Postgres to be truly ready
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - n8n_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1.5G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+# =============================================================================
+# Named volumes — Docker manages the actual storage location for these.
+# Run "docker volume inspect n8n_data" to see where they live on disk.
+# =============================================================================
+volumes:
+  postgres_data:
+  n8n_data:
+
+networks:
+  n8n_network:
+    driver: bridge
+
+# =============================================================================
+# UPDATING N8N LATER:
+#   1. Change the image tag above (e.g. n8nio/n8n:2.33.0) to a newer version.
+#   2. Back up first:  docker compose exec postgres pg_dump -U <user> <db> > backup.sql
+#   3. Run: docker compose pull && docker compose up -d
+# Pinning a version (instead of using ":latest") means updates only happen
+# when YOU choose, not silently on a random restart.
+# =============================================================================

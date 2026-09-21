@@ -1,0 +1,5 @@
+interface:
+  display_name: "Bruno Test Writer"
+  short_description: "Write Bruno tests, assertions, and scripts."
+  icon: "check-circle"
+  color: "#ECAC42"
